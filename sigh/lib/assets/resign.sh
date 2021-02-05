@@ -63,6 +63,18 @@
 # new features November 2018
 # 1. only create the archived-expanded-entitlements.xcent file if the version of Xcode < 9.3 as Xcode 10 does not create it.
 #
+# new features January 2019
+# 1. fixed bug where the com.apple.icloud-container-environment entitlement was being assigned an incorrect value
+#
+# new features March 2019
+# 1. two more fixes for only creating the archived-expanded-entitlements.xcent file if the version of Xcode < 9.3 as Xcode 10 does not create it.
+#
+# new features June 2020
+# 1. enable (re)signing of OnDemandResources when ipa has been built for the appstore
+#
+# new features August 2020
+# 1. fixes usage for users with GNU-sed in their $PATH
+#
 
 # Logging functions
 
@@ -468,7 +480,7 @@ function resign {
         log "Profile app identifier prefix is '$APP_IDENTIFIER_PREFIX'"
     fi
 
-    # Set new app identifer prefix if such entry exists in plist file
+    # Set new app identifier prefix if such entry exists in plist file
     PlistBuddy -c "Set :AppIdentifierPrefix $APP_IDENTIFIER_PREFIX." "$APP_PATH/Info.plist" 2>/dev/null
 
     TEAM_IDENTIFIER=$(PlistBuddy -c "Print :Entitlements:com.apple.developer.team-identifier" "$TEMP_DIR/profile.plist" | tr -d '\n')
@@ -520,6 +532,21 @@ function resign {
         # Even if the old value is same - just update, less code, less debugging
         log "Updating the bundle version (CFBundleVersion) from '$CURRENT_VALUE' to '$BUNDLE_VERSION'"
         PlistBuddy -c "Set :CFBundleVersion $BUNDLE_VERSION" "$APP_PATH/Info.plist"
+    fi
+
+    # Check for and resign OnDemandResource folders
+    ODR_DIR="$(dirname "$APP_PATH")/OnDemandResources"
+    if [ -d "$ODR_DIR" ]; then
+        for assetpack in "$ODR_DIR"/*
+        do
+            if [[ "$assetpack" == *.assetpack ]]; then
+                rm -rf $assetpack/_CodeSignature
+                /usr/bin/codesign ${VERBOSE} ${KEYCHAIN_FLAG} -f -s "$CERTIFICATE" "$assetpack"
+                checkStatus
+            else
+                log "Ignoring non-assetpack: $assetpack"
+            fi
+        done
     fi
 
     # Check for and resign any embedded frameworks (new feature for iOS 8 and above apps)
@@ -586,7 +613,10 @@ function resign {
 
         log "Resigning application using certificate: '$CERTIFICATE'"
         log "and entitlements: $ENTITLEMENTS"
-        cp -f "$ENTITLEMENTS" "$APP_PATH/archived-expanded-entitlements.xcent"
+        if [[ "${XCODE_VERSION/.*/}" -lt 10 ]]; then
+            log "Creating an archived-expanded-entitlements.xcent file for Xcode 9 builds or earlier"
+            cp -f "$ENTITLEMENTS" "$APP_PATH/archived-expanded-entitlements.xcent"
+        fi
         /usr/bin/codesign ${VERBOSE} -f -s "$CERTIFICATE" --entitlements "$ENTITLEMENTS" "$APP_PATH"
         checkStatus
     elif  [[ -n "${USE_APP_ENTITLEMENTS}" ]]; then
@@ -611,7 +641,7 @@ function resign {
         # Start with using what comes in provisioning profile entitlements before patching
         cp -f "$PROFILE_ENTITLEMENTS" "$PATCHED_ENTITLEMENTS"
 
-        log "Removing blacklisted keys from patched profile"
+        log "Removing denylisted keys from patched profile"
         # See https://github.com/facebook/buck/issues/798 and https://github.com/facebook/buck/pull/802/files
 
         # Update in https://github.com/facebook/buck/commit/99c0fbc3ab5ecf04d186913374f660683deccdef
@@ -619,7 +649,7 @@ function resign {
 
         # Buck changes referenced above are not self-explanatory and do not seem exhaustive or up-to-date
         # Comments below explain the rules applied to each key in order to make realignment with future Xcode export logic easier
-        BLACKLISTED_KEYS=(\
+        DENYLISTED_KEYS=(\
             # PP list identifiers inconsistent with app-defined ones and this key does not seem to appear in IPA entitlements, so ignore it
             "com.apple.developer.icloud-container-development-container-identifiers" \
             # This key has an invalid generic value in PP (actual value is set by Xcode during export), see dedicated processing a few blocks below
@@ -628,7 +658,7 @@ function resign {
             "com.apple.developer.icloud-container-identifiers" \
             # PP enable all available services and not app-defined ones, must use App entitlements value
             "com.apple.developer.icloud-services" \
-            # Was already blacklisted in previous version, but has someone ever seen this key in a PP?
+            # Was already denylisted in previous version, but has someone ever seen this key in a PP?
             "com.apple.developer.restricted-resource-mode" \
             # If actually used by the App, this value will be set in its entitlements
             "com.apple.developer.nfc.readersession.formats" \
@@ -648,6 +678,8 @@ function resign {
             "com.apple.developer.homekit" \
             # If actually used by the App, this value will be set in its entitlements
             "com.apple.developer.healthkit" \
+            # If actually used by the App, this value will be set in its entitlements
+            "com.apple.developer.healthkit.access" \
             # PP list identifiers inconsistent with app-defined ones, must use App entitlements value
             "com.apple.developer.in-app-payments" \
             # If actually used by the App, this value will be set in its entitlements
@@ -664,22 +696,22 @@ function resign {
             "com.apple.developer.default-data-protection" \
             # PP seem to list the same groups as the App, but use App entitlements value to be sure
             "com.apple.security.application-groups" \
-            # Was already blacklisted in previous version, seems to be an artifact from an old Xcode release
+            # Was already denylisted in previous version, seems to be an artifact from an old Xcode release
             "com.apple.developer.maps" \
             # If actually used by the App, this value will be set in its entitlements
             "com.apple.external-accessory.wireless-configuration"
         )
 
-        # Blacklisted keys must not be included into new profile, so remove them from patched profile
-        for KEY in "${BLACKLISTED_KEYS[@]}"; do
-            log "Removing blacklisted key: $KEY"
+        # Denylisted keys must not be included into new profile, so remove them from patched profile
+        for KEY in "${DENYLISTED_KEYS[@]}"; do
+            log "Removing denylisted key: $KEY"
             PlistBuddy -c "Delete $KEY" "$PATCHED_ENTITLEMENTS" 2>/dev/null
         done
 
         # Get the old and new app identifier (prefix)
         APP_ID_KEY="application-identifier"
         # Extract just the identifier from the value
-        # Use the fact that we are after some identifer, which is always at the start of the string
+        # Use the fact that we are after some identifier, which is always at the start of the string
         OLD_APP_ID=$(PlistBuddy -c "Print $APP_ID_KEY" "$APP_ENTITLEMENTS" | grep -E '^[A-Z0-9]*' -o | tr -d '\n')
         NEW_APP_ID=$(PlistBuddy -c "Print $APP_ID_KEY" "$PROFILE_ENTITLEMENTS" | grep -E '^[A-Z0-9]*' -o | tr -d '\n')
 
@@ -706,6 +738,7 @@ function resign {
             "com.apple.developer.associated-domains" \
             "com.apple.developer.default-data-protection" \
             "com.apple.developer.healthkit" \
+            "com.apple.developer.healthkit.access" \
             "com.apple.developer.homekit" \
             "com.apple.developer.icloud-container-environment" \
             "com.apple.developer.icloud-container-identifiers" \
@@ -732,7 +765,7 @@ function resign {
 
             # Get the entry from app's entitlements
             # Read it with PlistBuddy as XML, then strip the header and <plist></plist> part
-            ENTITLEMENTS_VALUE="$(PlistBuddy -x -c "Print $KEY" "$APP_ENTITLEMENTS" 2>/dev/null | sed -e 's,.*<plist[^>]*>\(.*\)</plist>,\1,g')"
+            ENTITLEMENTS_VALUE="$(PlistBuddy -x -c "Print $KEY" "$APP_ENTITLEMENTS" 2>/dev/null | /usr/bin/sed -e 's,.*<plist[^>]*>\(.*\)</plist>,\1,g')"
             if [[ -z "$ENTITLEMENTS_VALUE" ]]; then
                 log "No value for '$KEY'"
                 continue
@@ -743,7 +776,19 @@ function resign {
                 # This value is set by Xcode during export (manually selected for Development and AdHoc, automatically set to Production for Store)
                 # Would need an additional dedicated option to specify the iCloud environment to be used (Development or Production)
                 # For now, we assume Production is to be used when signing with a Distribution certificate, Development if not
-                if [[ "$CERTIFICATE" =~ "Distribution:" ]]; then
+                local certificate_name=$CERTIFICATE
+                local sha1_pattern='[0-9A-F]{40}'
+
+                if [[ "$CERTIFICATE" =~ $sha1_pattern ]]; then
+                    log "Certificate $CERTIFICATE matches a SHA1 pattern"
+                    local certificate_matches="$( security find-identity -v -p codesigning | grep -m 1 "$CERTIFICATE" )"
+                    if [ -n "$certificate_matches" ]; then
+                        certificate_name="$(/usr/bin/sed -E s/[^\"]+\"\([^\"]+\)\".*/\\1/ <<< $certificate_matches )"
+                        log "Certificate name: $certificate_name"
+                    fi
+                fi
+
+                if [[ "$certificate_name" =~ "Distribution:" ]]; then
                     ICLOUD_ENV="Production"
                 else
                     ICLOUD_ENV="Development"
@@ -765,18 +810,18 @@ function resign {
             # otherwise it interprets they key path as nested keys
             # TODO: Should be able to replace with echo ${KEY//\./\\\\.} and remove shellcheck disable directive
             # shellcheck disable=SC2001
-            PLUTIL_KEY=$(echo "$KEY" | sed 's/\./\\\./g')
+            PLUTIL_KEY=$(echo "$KEY" | /usr/bin/sed 's/\./\\\./g')
             plutil -insert "$PLUTIL_KEY" -xml "$ENTITLEMENTS_VALUE" "$PATCHED_ENTITLEMENTS"
 
             # Patch the ID value if specified
             if [[ "$ID_TYPE" == "APP_ID" ]]; then
                 # Replace old value with new value in patched entitlements
                 log "Replacing old app identifier prefix '$OLD_APP_ID' with new value '$NEW_APP_ID'"
-                sed -i .bak "s/$OLD_APP_ID/$NEW_APP_ID/g" "$PATCHED_ENTITLEMENTS"
+                /usr/bin/sed -i .bak "s/$OLD_APP_ID/$NEW_APP_ID/g" "$PATCHED_ENTITLEMENTS"
             elif [[ "$ID_TYPE" == "TEAM_ID" ]]; then
                 # Replace old team identifier with new value
                 log "Replacing old team ID '$OLD_TEAM_ID' with new team ID: '$NEW_TEAM_ID'"
-                sed -i .bak "s/$OLD_TEAM_ID/$NEW_TEAM_ID/g" "$PATCHED_ENTITLEMENTS"
+                /usr/bin/sed -i .bak "s/$OLD_TEAM_ID/$NEW_TEAM_ID/g" "$PATCHED_ENTITLEMENTS"
             else
                 continue
             fi
@@ -787,12 +832,21 @@ function resign {
         OLD_BUNDLE_ID="$(PlistBuddy -c "Print :CFBundleIdentifier" "$TEMP_DIR/oldInfo.plist")"
         NEW_BUNDLE_ID="$(bundle_id_for_provison "$NEW_PROVISION")"
         log "Replacing old bundle ID '$OLD_BUNDLE_ID' with new bundle ID '$NEW_BUNDLE_ID' in patched entitlements"
-        sed -i .bak "s/$OLD_BUNDLE_ID/$NEW_BUNDLE_ID/g" "$PATCHED_ENTITLEMENTS"
+        # Note: ideally we'd match against the opening <string> tag too, but this isn't possible
+        # because $OLD_BUNDLE_ID and $NEW_BUNDLE_ID do not include the team ID prefix which is
+        # present in the entitlements file.
+        # e.g. <string>AB1GP98Q19.com.example.foo</string>
+        #         vs
+        #      com.example.foo
+        /usr/bin/sed -i .bak "s!${OLD_BUNDLE_ID}</string>!${NEW_BUNDLE_ID}</string>!g" "$PATCHED_ENTITLEMENTS"
 
         log "Resigning application using certificate: '$CERTIFICATE'"
         log "and patched entitlements:"
         log "$(cat "$PATCHED_ENTITLEMENTS")"
-        cp -f "$PATCHED_ENTITLEMENTS" "$APP_PATH/archived-expanded-entitlements.xcent"
+        if [[ "${XCODE_VERSION/.*/}" -lt 10 ]]; then
+            log "Creating an archived-expanded-entitlements.xcent file for Xcode 9 builds or earlier"
+            cp -f "$PATCHED_ENTITLEMENTS" "$APP_PATH/archived-expanded-entitlements.xcent"
+        fi
         /usr/bin/codesign ${VERBOSE} -f -s "$CERTIFICATE" --entitlements "$PATCHED_ENTITLEMENTS" "$APP_PATH"
         checkStatus
     else

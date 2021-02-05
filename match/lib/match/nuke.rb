@@ -25,6 +25,10 @@ module Match
       self.params = params
       self.type = type
 
+      update_optional_values_depending_on_storage_type(params)
+
+      spaceship_login
+
       self.storage = Storage.for_mode(params[:storage_mode], {
         git_url: params[:git_url],
         shallow_clone: params[:shallow_clone],
@@ -32,7 +36,15 @@ module Match
         git_branch: params[:git_branch],
         git_full_name: params[:git_full_name],
         git_user_email: params[:git_user_email],
-        clone_branch_directly: params[:clone_branch_directly]
+        clone_branch_directly: params[:clone_branch_directly],
+        google_cloud_bucket_name: params[:google_cloud_bucket_name].to_s,
+        google_cloud_keys_file: params[:google_cloud_keys_file].to_s,
+        google_cloud_project_id: params[:google_cloud_project_id].to_s,
+        s3_region: params[:s3_region].to_s,
+        s3_access_key: params[:s3_access_key].to_s,
+        s3_secret_access_key: params[:s3_secret_access_key].to_s,
+        s3_bucket: params[:s3_bucket].to_s,
+        team_id: params[:team_id] || Spaceship::ConnectAPI.client.portal_team_id
       })
       self.storage.download
 
@@ -41,7 +53,7 @@ module Match
         git_url: params[:git_url],
         working_directory: storage.working_directory
       })
-      self.encryption.decrypt_files
+      self.encryption.decrypt_files if self.encryption
 
       had_app_identifier = self.params.fetch(:app_identifier, ask: false)
       self.params[:app_identifier] = '' # we don't really need a value here
@@ -76,20 +88,23 @@ module Match
       end
     end
 
-    # Collect all the certs/profiles
-    def prepare_list
-      UI.message("Fetching certificates and profiles...")
-      cert_type = Match.cert_type_sym(type)
+    # Be smart about optional values here
+    # Depending on the storage mode, different values are required
+    def update_optional_values_depending_on_storage_type(params)
+      if params[:storage_mode] != "git"
+        params.option_for_key(:git_url).optional = true
+      end
+    end
 
-      prov_types = []
-      prov_types = [:development] if cert_type == :development
-      prov_types = [:appstore, :adhoc] if cert_type == :distribution
-      prov_types = [:enterprise] if cert_type == :enterprise
+    def spaceship_login
+      if api_token
+        UI.message("Creating authorization token for App Store Connect API")
+        Spaceship::ConnectAPI.token = api_token
+      else
+        Spaceship::ConnectAPI.login(params[:username], use_portal: true, use_tunes: false, portal_team_id: params[:team_id], team_name: params[:team_name])
+      end
 
-      Spaceship.login(params[:username])
-      Spaceship.select_team
-
-      if Spaceship.client.in_house? && (type == "distribution" || type == "enterprise")
+      if Spaceship::ConnectAPI.client.in_house? && (type == "distribution" || type == "enterprise")
         UI.error("---")
         UI.error("⚠️ Warning: This seems to be an Enterprise account!")
         UI.error("By nuking your account's distribution, all your apps deployed via ad-hoc will stop working!") if type == "distribution"
@@ -98,18 +113,60 @@ module Match
 
         UI.user_error!("Enterprise account nuke cancelled") unless UI.confirm("Do you really want to nuke your Enterprise account?")
       end
+    end
 
-      self.certs = certificate_type(cert_type).all
+    def api_token
+      @api_token ||= Spaceship::ConnectAPI::Token.create(params[:api_key]) if params[:api_key]
+      @api_token ||= Spaceship::ConnectAPI::Token.from_json_file(params[:api_key_path]) if params[:api_key_path]
+      return @api_token
+    end
+
+    # Collect all the certs/profiles
+    def prepare_list
+      UI.message("Fetching certificates and profiles...")
+      cert_type = Match.cert_type_sym(type)
+      cert_types = [cert_type]
+
+      prov_types = []
+      prov_types = [:development] if cert_type == :development
+      prov_types = [:appstore, :adhoc, :developer_id] if cert_type == :distribution
+      prov_types = [:enterprise] if cert_type == :enterprise
+
+      # Get all iOS and macOS profile
       self.profiles = []
       prov_types.each do |prov_type|
-        self.profiles += profile_type(prov_type).all
+        types = profile_types(prov_type)
+        # Filtering on 'profileType' seems to be undocumented as of 2020-07-30
+        # but works on both web session and official API
+        self.profiles += Spaceship::ConnectAPI::Profile.all(filter: { profileType: types.join(",") })
       end
 
-      certs = Dir[File.join(self.storage.working_directory, "**", cert_type.to_s, "*.cer")]
-      keys = Dir[File.join(self.storage.working_directory, "**", cert_type.to_s, "*.p12")]
+      # Gets the main and additional cert types
+      cert_types += (params[:additional_cert_types] || []).map do |ct|
+        Match.cert_type_sym(ct)
+      end
+
+      # Gets all the certs form the cert types
+      self.certs = []
+      self.certs += cert_types.map do |ct|
+        certificate_type(ct).flat_map do |cert|
+          Spaceship::ConnectAPI::Certificate.all(filter: { certificateType: cert })
+        end
+      end.flatten
+
+      # Finds all the .cer and .p12 files in the file storage
+      certs = []
+      keys = []
+      cert_types.each do |ct|
+        certs += self.storage.list_files(file_name: ct.to_s, file_ext: "cer")
+        keys += self.storage.list_files(file_name: ct.to_s, file_ext: "p12")
+      end
+
+      # Finds all the iOS and macOS profofiles in the file storage
       profiles = []
       prov_types.each do |prov_type|
-        profiles += Dir[File.join(self.storage.working_directory, "**", prov_type.to_s, "*.mobileprovision")]
+        profiles += self.storage.list_files(file_name: prov_type.to_s, file_ext: "mobileprovision")
+        profiles += self.storage.list_files(file_name: prov_type.to_s, file_ext: "provisionprofile")
       end
 
       self.files = certs + keys + profiles
@@ -120,7 +177,7 @@ module Match
       puts("")
       if self.certs.count > 0
         rows = self.certs.collect do |cert|
-          cert_expiration = cert.expires.nil? ? "Unknown" : cert.expires.strftime("%Y-%m-%d")
+          cert_expiration = cert.expiration_date.nil? ? "Unknown" : Time.parse(cert.expiration_date).strftime("%Y-%m-%d")
           [cert.name, cert.id, cert.class.to_s.split("::").last, cert_expiration]
         end
         puts(Terminal::Table.new({
@@ -133,11 +190,11 @@ module Match
 
       if self.profiles.count > 0
         rows = self.profiles.collect do |p|
-          status = p.status == 'Active' ? p.status.green : p.status.red
+          status = p.valid? ? p.profile_state.green : p.profile_state.red
 
-          # Expires is somtimes nil
-          expires = p.expires ? p.expires.strftime("%Y-%m-%d") : nil
-          [p.name, p.id, status, p.type, expires]
+          # Expires is sometimes nil
+          expires = p.expiration_date ? Time.parse(p.expiration_date).strftime("%Y-%m-%d") : nil
+          [p.name, p.id, status, p.profile_type, expires]
         end
         puts(Terminal::Table.new({
           title: "Provisioning Profiles that are going to be revoked".green,
@@ -156,8 +213,9 @@ module Match
 
           [file_type, components[2]]
         end
+
         puts(Terminal::Table.new({
-          title: "Files that are going to be deleted".green,
+          title: "Files that are going to be deleted".green + "\n" + self.storage.human_readable_description,
           headings: ["Type", "File Name"],
           rows: rows
         }))
@@ -181,7 +239,7 @@ module Match
       self.certs.each do |cert|
         UI.message("Revoking certificate '#{cert.name}' (#{cert.id})...")
         begin
-          cert.revoke!
+          cert.delete!
         rescue => ex
           UI.message(ex.to_s)
         end
@@ -189,14 +247,20 @@ module Match
       end
 
       if self.files.count > 0
-        delete_files!
+        files_to_delete = delete_files!
       end
 
-      self.encryption.encrypt_files
+      self.encryption.encrypt_files if self.encryption
 
-      # Now we need to commit and push all this too
-      message = ["[fastlane]", "Nuked", "files", "for", type.to_s].join(" ")
-      self.storage.save_changes!(files_to_commit: [], custom_message: message)
+      if files_to_delete.count > 0
+        # Now we need to save all this to the storage too, if needed
+        message = ["[fastlane]", "Nuked", "files", "for", type.to_s].join(" ")
+        self.storage.save_changes!(files_to_commit: [],
+                                   files_to_delete: files_to_delete,
+                                   custom_message: message)
+      else
+        UI.message("Your storage had no files to be deleted. This happens when you run `nuke` with an empty storage. Nothing to be worried about!")
+      end
     end
 
     private
@@ -204,7 +268,7 @@ module Match
     def delete_files!
       UI.header("Deleting #{self.files.count} files from the storage...")
 
-      self.files.each do |file|
+      return self.files.collect do |file|
         UI.message("Deleting file '#{File.basename(file)}'...")
 
         # Check if the profile is installed on the local machine
@@ -217,26 +281,74 @@ module Match
 
         File.delete(file)
         UI.success("Successfully deleted file")
+
+        file
       end
     end
 
     # The kind of certificate we're interested in
     def certificate_type(type)
-      {
-        distribution: Spaceship.certificate.production,
-        development:  Spaceship.certificate.development,
-        enterprise:   Spaceship.certificate.in_house
-      }[type] ||= raise "Unknown type '#{type}'"
+      case type.to_sym
+      when :mac_installer_distribution
+        return [
+          Spaceship::ConnectAPI::Certificate::CertificateType::MAC_INSTALLER_DISTRIBUTION
+        ]
+      when :distribution
+        return [
+          Spaceship::ConnectAPI::Certificate::CertificateType::MAC_APP_DISTRIBUTION,
+          Spaceship::ConnectAPI::Certificate::CertificateType::IOS_DISTRIBUTION,
+          Spaceship::ConnectAPI::Certificate::CertificateType::DISTRIBUTION
+        ]
+      when :development
+        return [
+          Spaceship::ConnectAPI::Certificate::CertificateType::MAC_APP_DEVELOPMENT,
+          Spaceship::ConnectAPI::Certificate::CertificateType::IOS_DEVELOPMENT,
+          Spaceship::ConnectAPI::Certificate::CertificateType::DEVELOPMENT
+        ]
+      when :enterprise
+        return [
+          Spaceship::ConnectAPI::Certificate::CertificateType::IOS_DISTRIBUTION
+        ]
+      else
+        raise "Unknown type '#{type}'"
+      end
     end
 
     # The kind of provisioning profile we're interested in
-    def profile_type(prov_type)
-      {
-        appstore:    Spaceship.provisioning_profile.app_store,
-        development: Spaceship.provisioning_profile.development,
-        enterprise:  Spaceship.provisioning_profile.in_house,
-        adhoc:       Spaceship.provisioning_profile.ad_hoc
-      }[prov_type] ||= raise "Unknown provisioning type '#{prov_type}'"
+    def profile_types(prov_type)
+      case prov_type.to_sym
+      when :appstore
+        return [
+          Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_STORE,
+          Spaceship::ConnectAPI::Profile::ProfileType::MAC_APP_STORE,
+          Spaceship::ConnectAPI::Profile::ProfileType::TVOS_APP_STORE,
+          Spaceship::ConnectAPI::Profile::ProfileType::MAC_CATALYST_APP_STORE
+        ]
+      when :development
+        return [
+          Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_DEVELOPMENT,
+          Spaceship::ConnectAPI::Profile::ProfileType::MAC_APP_DEVELOPMENT,
+          Spaceship::ConnectAPI::Profile::ProfileType::TVOS_APP_DEVELOPMENT,
+          Spaceship::ConnectAPI::Profile::ProfileType::MAC_CATALYST_APP_DEVELOPMENT
+        ]
+      when :enterprise
+        return [
+          Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_INHOUSE,
+          Spaceship::ConnectAPI::Profile::ProfileType::TVOS_APP_INHOUSE
+        ]
+      when :adhoc
+        return [
+          Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_ADHOC,
+          Spaceship::ConnectAPI::Profile::ProfileType::TVOS_APP_ADHOC
+        ]
+      when :developer_id
+        return [
+          Spaceship::ConnectAPI::Profile::ProfileType::MAC_APP_DIRECT,
+          Spaceship::ConnectAPI::Profile::ProfileType::MAC_CATALYST_APP_DIRECT
+        ]
+      else
+        raise "Unknown provisioning type '#{prov_type}'"
+      end
     end
   end
 end

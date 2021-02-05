@@ -16,6 +16,7 @@ module Scan
   class Runner
     def initialize
       @test_command_generator = TestCommandGenerator.new
+      @device_boot_datetime = DateTime.now
     end
 
     def run
@@ -23,12 +24,33 @@ module Scan
     end
 
     def test_app
-      # We call this method, to be sure that all other simulators are killed
-      # And a correct one is freshly launched. Switching between multiple simulator
-      # in case the user specified multiple targets works with no issues
-      # This way it's okay to just call it for the first simulator we're using for
-      # the first test run
-      open_simulator_for_device(Scan.devices.first) if Scan.devices
+      force_quit_simulator_processes if Scan.config[:force_quit_simulator]
+
+      if Scan.devices
+        if Scan.config[:reset_simulator]
+          Scan.devices.each do |device|
+            FastlaneCore::Simulator.reset(udid: device.udid)
+          end
+        end
+
+        if Scan.config[:disable_slide_to_type]
+          Scan.devices.each do |device|
+            FastlaneCore::Simulator.disable_slide_to_type(udid: device.udid)
+          end
+        end
+      end
+
+      prelaunch_simulators
+
+      if Scan.config[:reinstall_app]
+        app_identifier = Scan.config[:app_identifier]
+        app_identifier ||= UI.input("App Identifier: ")
+
+        Scan.devices.each do |device|
+          FastlaneCore::Simulator.uninstall_app(app_identifier, device.name, device.udid)
+        end
+      end
+
       command = @test_command_generator.generate
       prefix_hash = [
         {
@@ -40,15 +62,6 @@ module Scan
       ]
       exit_status = 0
 
-      if Scan.config[:reinstall_app]
-        app_identifier = Scan.config[:app_identifier]
-        app_identifier ||= UI.input("App Identifier: ")
-
-        Scan.devices.each do |device|
-          FastlaneCore::Simulator.uninstall_app(app_identifier, device.name, device.udid)
-        end
-      end
-
       FastlaneCore::CommandExecutor.execute(command: command,
                                           print_all: true,
                                       print_command: true,
@@ -58,7 +71,7 @@ module Scan
                                               error: proc do |error_output|
                                                 begin
                                                   exit_status = $?.exitstatus
-                                                  ErrorHandler.handle_build_error(error_output)
+                                                  ErrorHandler.handle_build_error(error_output, @test_command_generator.xcodebuild_log_path)
                                                 rescue => ex
                                                   SlackPoster.new.run({
                                                     build_errors: 1
@@ -70,6 +83,13 @@ module Scan
     end
 
     def handle_results(tests_exit_status)
+      if Scan.config[:disable_xcpretty]
+        unless tests_exit_status == 0
+          UI.test_failure!("Test execution failed. Exit status: #{tests_exit_status}")
+        end
+        return
+      end
+
       result = TestResultParser.new.parse_result(test_results)
       SlackPoster.new.run(result)
 
@@ -89,6 +109,7 @@ module Scan
       puts("")
 
       copy_simulator_logs
+      zip_build_products
 
       if result[:failures] > 0
         open_report
@@ -100,7 +121,6 @@ module Scan
         UI.test_failure!("Test execution failed. Exit status: #{tests_exit_status}")
       end
 
-      zip_build_products
       open_report
     end
 
@@ -127,7 +147,7 @@ module Scan
       # Zips build products and moves it to output directory
       UI.message("Zipping build products")
       FastlaneCore::Helper.zip_directory(path, output_path, contents_only: true, overwrite: true, print: false)
-      UI.message("Succesfully zipped build products: #{output_path}")
+      UI.message("Successfully zipped build products: #{output_path}")
     end
 
     def test_results
@@ -146,23 +166,37 @@ module Scan
       File.read(Scan.cache[:temp_junit_report])
     end
 
+    def prelaunch_simulators
+      return unless Scan.devices.to_a.size > 0 # no devices selected, no sims to launch
+
+      # Return early unless the user wants to prelaunch simulators. Or if the user wants simulator logs
+      # then we must prelaunch simulators because Xcode's headless
+      # mode launches and shutsdown the simulators before we can collect the logs.
+      return unless Scan.config[:prelaunch_simulator] || Scan.config[:include_simulator_logs]
+
+      devices_to_shutdown = []
+      Scan.devices.each do |device|
+        devices_to_shutdown << device if device.state == "Shutdown"
+        device.boot
+      end
+      at_exit do
+        devices_to_shutdown.each(&:shutdown)
+      end
+    end
+
     def copy_simulator_logs
       return unless Scan.config[:include_simulator_logs]
 
       UI.header("Collecting system logs")
       Scan.devices.each do |device|
         log_identity = "#{device.name}_#{device.os_type}_#{device.os_version}"
-        FastlaneCore::Simulator.copy_logs(device, log_identity, Scan.config[:output_directory])
+        FastlaneCore::Simulator.copy_logs(device, log_identity, Scan.config[:output_directory], @device_boot_datetime)
       end
     end
 
-    def open_simulator_for_device(device)
-      return unless FastlaneCore::Env.truthy?('FASTLANE_EXPLICIT_OPEN_SIMULATOR')
-
-      UI.message("Killing all running simulators")
-      `killall Simulator &> /dev/null`
-
-      FastlaneCore::Simulator.launch(device)
+    def force_quit_simulator_processes
+      # Silently execute and kill, verbose flags will show this command occurring
+      Fastlane::Actions.sh("killall Simulator &> /dev/null || true", log: false)
     end
   end
 end

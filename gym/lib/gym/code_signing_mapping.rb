@@ -88,12 +88,40 @@ module Gym
       when "tvOS"
         destination_sdkroot = ["appletvos"]
       end
+
+      # Catalyst projects will always have an "iphoneos" sdkroot
+      # Need to force a same platform when trying to build as macos
+      if Gym.building_mac_catalyst_for_mac?
+        return true
+      end
+
       return destination_sdkroot.include?(sdkroot)
+    end
+
+    def detect_configuration_for_archive
+      extract_from_scheme = lambda do
+        if self.project.workspace?
+          available_schemes = self.project.workspace.schemes.reject { |k, v| v.include?("Pods/Pods.xcodeproj") }
+          project_path = available_schemes[Gym.config[:scheme]]
+        else
+          project_path = self.project.path
+        end
+
+        if project_path
+          scheme_path = File.join(project_path, "xcshareddata", "xcschemes", "#{Gym.config[:scheme]}.xcscheme")
+          Xcodeproj::XCScheme.new(scheme_path).archive_action.build_configuration if File.exist?(scheme_path)
+        end
+      end
+
+      configuration = Gym.config[:configuration]
+      configuration ||= extract_from_scheme.call if Gym.config[:scheme]
+      configuration ||= self.project.default_build_settings(key: "CONFIGURATION")
+      return configuration
     end
 
     def detect_project_profile_mapping
       provisioning_profile_mapping = {}
-      specified_configuration = Gym.config[:configuration] || Gym.project.default_build_settings(key: "CONFIGURATION")
+      specified_configuration = detect_configuration_for_archive
 
       self.project.project_paths.each do |project_path|
         UI.verbose("Parsing project file '#{project_path}' to find selected provisioning profiles")
@@ -109,14 +137,35 @@ module Gym
             target.build_configuration_list.build_configurations.each do |build_configuration|
               current = build_configuration.build_settings
               next if test_target?(current)
-              sdkroot = build_configuration.resolve_build_setting("SDKROOT")
+              sdkroot = build_configuration.resolve_build_setting("SDKROOT", target)
               next unless same_platform?(sdkroot)
               next unless specified_configuration == build_configuration.name
 
-              bundle_identifier = build_configuration.resolve_build_setting("PRODUCT_BUNDLE_IDENTIFIER")
+              # Catalyst apps will have some build settings that will have a configuration
+              # that is specific for macos so going to do our best to capture those
+              #
+              # There are other platform filters besides "[sdk=macosx*]" that we could use but
+              # this is the default that Xcode will use so this will also be our default
+              sdk_specifier = Gym.building_mac_catalyst_for_mac? ? "[sdk=macosx*]" : ""
+
+              # Look for sdk specific bundle identifier (if set) and fallback to general configuration if none
+              bundle_identifier = build_configuration.resolve_build_setting("PRODUCT_BUNDLE_IDENTIFIER#{sdk_specifier}", target)
+              bundle_identifier ||= build_configuration.resolve_build_setting("PRODUCT_BUNDLE_IDENTIFIER", target)
               next unless bundle_identifier
-              provisioning_profile_specifier = build_configuration.resolve_build_setting("PROVISIONING_PROFILE_SPECIFIER")
-              provisioning_profile_uuid = build_configuration.resolve_build_setting("PROVISIONING_PROFILE")
+
+              # Xcode prefixes "maccatalyst." if building a Catalyst app for mac and
+              # if DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER is set to YES
+              if Gym.building_mac_catalyst_for_mac? && build_configuration.resolve_build_setting("DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER", target) == "YES"
+                bundle_identifier = "maccatalyst.#{bundle_identifier}"
+              end
+
+              # Look for sdk specific provisioning profile specifier (if set) and fallback to general configuration if none
+              provisioning_profile_specifier = build_configuration.resolve_build_setting("PROVISIONING_PROFILE_SPECIFIER#{sdk_specifier}", target)
+              provisioning_profile_specifier ||= build_configuration.resolve_build_setting("PROVISIONING_PROFILE_SPECIFIER", target)
+
+              # Look for sdk specific provisioning profile uuid (if set) and fallback to general configuration if none
+              provisioning_profile_uuid = build_configuration.resolve_build_setting("PROVISIONING_PROFILE#{sdk_specifier}", target)
+              provisioning_profile_uuid ||= build_configuration.resolve_build_setting("PROVISIONING_PROFILE", target)
 
               has_profile_specifier = provisioning_profile_specifier.to_s.length > 0
               has_profile_uuid = provisioning_profile_uuid.to_s.length > 0
@@ -156,5 +205,6 @@ module Gym
 
       return provisioning_profile_mapping
     end
+    # rubocop:enable Metrics/PerceivedComplexity
   end
 end

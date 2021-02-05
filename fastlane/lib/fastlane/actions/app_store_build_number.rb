@@ -1,14 +1,18 @@
+require 'ostruct'
+
 module Fastlane
   module Actions
     module SharedValues
       LATEST_BUILD_NUMBER = :LATEST_BUILD_NUMBER
+      LATEST_VERSION = :LATEST_VERSION
     end
 
     class AppStoreBuildNumberAction < Action
       def self.run(params)
         require 'spaceship'
 
-        build_nr = get_build_number(params)
+        result = get_build_number(params)
+        build_nr = result.build_nr
 
         # Convert build_nr to int (for legacy use) if no "." in string
         if build_nr.kind_of?(String) && !build_nr.include?(".")
@@ -16,61 +20,89 @@ module Fastlane
         end
 
         Actions.lane_context[SharedValues::LATEST_BUILD_NUMBER] = build_nr
+        Actions.lane_context[SharedValues::LATEST_VERSION] = result.build_v
+
+        return build_nr
       end
 
       def self.get_build_number(params)
-        UI.message("Login to App Store Connect (#{params[:username]})")
-        Spaceship::Tunes.login(params[:username])
-        Spaceship::Tunes.select_team
-        UI.message("Login successful")
+        # Prompts select team if multiple teams and none specified
+        token = self.api_token(params)
+        if token
+          UI.message("Using App Store Connect API token...")
+          Spaceship::ConnectAPI.token = token
+        else
+          UI.message("Login to App Store Connect (#{params[:username]})")
+          Spaceship::ConnectAPI.login(params[:username], use_portal: false, use_tunes: true, tunes_team_id: params[:team_id], team_name: params[:team_name])
+          UI.message("Login successful")
+        end
 
-        platform = params[:platform]
+        platform = Spaceship::ConnectAPI::Platform.map(params[:platform])
 
-        app = Spaceship::Tunes::Application.find(params[:app_identifier])
+        app = Spaceship::ConnectAPI::App.find(params[:app_identifier])
+        UI.user_error!("Could not find an app on App Store Connect with app_identifier: #{params[:app_identifier]}") unless app
         if params[:live]
           UI.message("Fetching the latest build number for live-version")
-          UI.user_error!("Could not find a live-version of #{params[:app_identifier]} on iTC") unless app.live_version
-          build_nr = app.live_version.current_build_number
+          live_version = app.get_live_app_store_version(platform: platform)
+
+          UI.user_error!("Could not find a live-version of #{params[:app_identifier]} on App Store Connect") unless live_version
+          build_nr = live_version.build.version
+
+          UI.message("Latest upload for live-version #{live_version.version_string} is build: #{build_nr}")
+
+          return OpenStruct.new({ build_nr: build_nr, build_v: live_version.version_string })
         else
           version_number = params[:version]
-          unless version_number
-            # Automatically fetch the latest version in testflight
-            begin
-              train_numbers = app.all_build_train_numbers(platform: platform)
-              testflight_version = self.order_versions(train_numbers).last
-            rescue
-              testflight_version = params[:version]
-            end
+          platform = params[:platform]
 
-            if testflight_version
-              version_number = testflight_version
-            else
-              version_number = UI.input("You have to specify a new version number, as there are multiple to choose from")
-            end
-
+          # Create filter for get_builds with optional version number
+          filter = { app: app.id }
+          if version_number
+            filter["preReleaseVersion.version"] = version_number
+            version_number_message = "version #{version_number}"
+          else
+            version_number_message = "any version"
           end
 
-          UI.message("Fetching the latest build number for version #{version_number}")
+          if platform
+            filter["preReleaseVersion.platform"] = Spaceship::ConnectAPI::Platform.map(platform)
+            platform_message = "#{platform} platform"
+          else
+            platform_message = "any platform"
+          end
 
-          begin
-            build_numbers = app.all_builds_for_train(train: version_number, platform: platform).map(&:build_version)
-            build_nr = self.order_versions(build_numbers).last
-            if build_nr.nil? && params[:initial_build_number]
-              UI.message("Could not find a build on iTC. Using supplied 'initial_build_number' option")
-              build_nr = params[:initial_build_number]
-            end
-          rescue
-            UI.user_error!("Could not find a build on iTC - and 'initial_build_number' option is not set") unless params[:initial_build_number]
+          UI.message("Fetching the latest build number for #{version_number_message}")
+
+          # Get latest build for optional version number and return build number if found
+          build = Spaceship::ConnectAPI.get_builds(filter: filter, sort: "-uploadedDate", includes: "preReleaseVersion", limit: 1).first
+          if build
+            build_nr = build.version
+            UI.message("Latest upload for version #{build.app_version} on #{platform_message} is build: #{build_nr}")
+            return OpenStruct.new({ build_nr: build_nr, build_v: build.app_version })
+          end
+
+          # Let user know that build couldn't be found
+          UI.important("Could not find a build for #{version_number_message} on #{platform_message} on App Store Connect")
+
+          if params[:initial_build_number].nil?
+            UI.user_error!("Could not find a build on App Store Connect - and 'initial_build_number' option is not set")
+          else
             build_nr = params[:initial_build_number]
+            UI.message("Using initial build number of #{build_nr}")
+            return OpenStruct.new({ build_nr: build_nr, build_v: version_number })
           end
         end
-        UI.message("Latest upload for version #{version_number} is build: #{build_nr}")
-
-        build_nr
       end
 
       def self.order_versions(versions)
         versions.map(&:to_s).sort_by { |v| Gem::Version.new(v) }
+      end
+
+      def self.api_token(params)
+        params[:api_key] ||= Actions.lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
+        api_token ||= Spaceship::ConnectAPI::Token.create(params[:api_key]) if params[:api_key]
+        api_token ||= Spaceship::ConnectAPI::Token.from_json_file(params[:api_key_path]) if params[:api_key_path]
+        return api_token
       end
 
       #####################################################
@@ -85,6 +117,21 @@ module Fastlane
         user = CredentialsManager::AppfileConfig.try_fetch_value(:itunes_connect_id)
         user ||= CredentialsManager::AppfileConfig.try_fetch_value(:apple_id)
         [
+          FastlaneCore::ConfigItem.new(key: :api_key_path,
+                                       env_name: "APPSTORE_BUILD_NUMBER_API_KEY_PATH",
+                                       description: "Path to your App Store Connect API Key JSON file (https://docs.fastlane.tools/app-store-connect-api/#using-fastlane-api-key-json-file)",
+                                       optional: true,
+                                       conflicting_options: [:api_key],
+                                       verify_block: proc do |value|
+                                         UI.user_error!("Couldn't find API key JSON file at path '#{value}'") unless File.exist?(value)
+                                       end),
+          FastlaneCore::ConfigItem.new(key: :api_key,
+                                       env_name: "APPSTORE_BUILD_NUMBER_API_KEY",
+                                       description: "Your App Store Connect API Key information (https://docs.fastlane.tools/app-store-connect-api/#use-return-value-and-pass-in-as-an-option)",
+                                       type: Hash,
+                                       optional: true,
+                                       sensitive: true,
+                                       conflicting_options: [:api_key_path]),
           FastlaneCore::ConfigItem.new(key: :initial_build_number,
                                        env_name: "INITIAL_BUILD_NUMBER",
                                        description: "sets the build number to given value if no build is in current train",
@@ -151,7 +198,8 @@ module Fastlane
 
       def self.output
         [
-          ['LATEST_BUILD_NUMBER', 'The latest build number of either live or testflight version']
+          ['LATEST_BUILD_NUMBER', 'The latest build number of either live or testflight version'],
+          ['LATEST_VERSION', 'The version of the latest build number']
         ]
       end
 
@@ -173,6 +221,14 @@ module Fastlane
             live: false,
             app_identifier: "app.identifier",
             version: "1.2.9"
+          )',
+          'api_key = app_store_connect_api_key(
+            key_id: "MyKeyID12345",
+            issuer_id: "00000000-0000-0000-0000-000000000000",
+            key_filepath: "./AuthKey.p8"
+          )
+          build_num = app_store_build_number(
+            api_key: api_key
           )'
         ]
       end

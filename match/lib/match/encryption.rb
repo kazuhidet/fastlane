@@ -11,6 +11,13 @@ module Match
             # to keychain_name for the name of the keychain entry
             params[:keychain_name] = params[:git_url]
             return Encryption::OpenSSL.configure(params)
+          },
+          "google_cloud" => lambda { |params|
+            return nil
+          },
+          "s3" => lambda { |params|
+            params[:keychain_name] = params[:s3_bucket]
+            return Encryption::OpenSSL.configure(params)
           }
         }
       end

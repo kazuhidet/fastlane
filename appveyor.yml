@@ -4,7 +4,7 @@ version: "{build}"
 
 # branches to build
 branches:
-  # whitelist
+  # allowlist
   only:
     - master
 
@@ -26,8 +26,10 @@ install:
   - set PATH=C:\Ruby24-x64\bin;%PATH%
   - bundle install
   # iconv
-  - appveyor DownloadFile https://downloads.sourceforge.net/project/gnuwin32/libiconv/1.9.2-1/libiconv-1.9.2-1.exe?download
-  - libiconv-1.9.2-1.exe /SILENT /SUPPRESSMSGBOXES
+  - appveyor DownloadFile
+    https://downloads.sourceforge.net/project/gnuwin32/libiconv/1.9.2-1/libiconv-1.9.2-1.exe?download
+    -FileName %TEMP%\libiconv.exe
+  - "%TEMP%\\libiconv.exe /SILENT /SUPPRESSMSGBOXES"
 
 environment:
   LC_ALL: en_US.UTF-8
@@ -44,4 +46,7 @@ before_test:
 build: off
 
 test_script:
+  # Uncomment the first line and comment the second one to debug failing tests
+  # on Windows (some tests might fail with this).
+  # - cmd /V /C "set DEBUG=1 && bundle exec fastlane execute_tests"
   - bundle exec fastlane execute_tests

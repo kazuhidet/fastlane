@@ -13,6 +13,7 @@ module Fastlane
 
         begin
           Cert.config = params # we alread have the finished config
+          Cert.config[:api_key] ||= Actions.lane_context[SharedValues::APP_STORE_CONNECT_API_KEY]
 
           Cert::Runner.new.launch
           cert_file_path = ENV["CER_FILE_PATH"]
@@ -40,6 +41,13 @@ module Fastlane
       def self.available_options
         require 'cert'
         Cert::Options.available_options
+      end
+
+      def self.output
+        [
+          ['CERT_FILE_PATH', 'The path to the certificate'],
+          ['CERT_CERTIFICATE_ID', 'The id of the certificate']
+        ]
       end
 
       def self.author

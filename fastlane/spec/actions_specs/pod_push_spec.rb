@@ -45,6 +45,22 @@ describe Fastlane do
         expect(result).to eq("pod repo push MyRepo './fastlane/spec/fixtures/podspecs/test.podspec' --allow-warnings --use-libraries")
       end
 
+      it "generates the correct pod push command with a repo parameter with the skip import validation and skip tests flags" do
+        result = Fastlane::FastFile.new.parse("lane :test do
+          pod_push(path: './fastlane/spec/fixtures/podspecs/test.podspec', repo: 'MyRepo', skip_import_validation: true, skip_tests: true)
+        end").runner.execute(:test)
+
+        expect(result).to eq("pod repo push MyRepo './fastlane/spec/fixtures/podspecs/test.podspec' --skip-import-validation --skip-tests")
+      end
+
+      it "generates the correct pod push command with a repo parameter with the use json flag" do
+        result = Fastlane::FastFile.new.parse("lane :test do
+          pod_push(path: './fastlane/spec/fixtures/podspecs/test.podspec', repo: 'MyRepo', use_json: true)
+        end").runner.execute(:test)
+
+        expect(result).to eq("pod repo push MyRepo './fastlane/spec/fixtures/podspecs/test.podspec' --use-json")
+      end
+
       it "generates the correct pod push command with a json file" do
         result = Fastlane::FastFile.new.parse("lane :test do
           pod_push(path: './fastlane/spec/fixtures/podspecs/test.podspec.json', repo: 'MyRepo')
@@ -82,6 +98,14 @@ describe Fastlane do
             expect(result).to eq("pod trunk push")
           end
         end
+      end
+
+      it "generates the correct pod push command with the synchronous parameter" do
+        result = Fastlane::FastFile.new.parse("lane :test do
+          pod_push(synchronous: true)
+        end").runner.execute(:test)
+
+        expect(result).to eq("pod trunk push --synchronous")
       end
     end
   end

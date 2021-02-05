@@ -14,7 +14,7 @@ module FastlaneCore
 
     def self.fastlane_enabled?
       # This is called from the root context on the first start
-      @enabled ||= !FastlaneCore::FastlaneFolder.path.nil?
+      !FastlaneCore::FastlaneFolder.path.nil?
     end
 
     # Checks if fastlane is enabled for this project and returns the folder where the configuration lives
@@ -66,16 +66,22 @@ module FastlaneCore
 
     # @return true if it is enabled to execute external commands
     def self.sh_enabled?
-      !self.test?
+      !self.test? || ENV["FORCE_SH_DURING_TESTS"]
     end
 
     # @return [boolean] true if building in a known CI environment
     def self.ci?
+      return true if self.is_circle_ci?
+
       # Check for Jenkins, Travis CI, ... environment variables
-      ['JENKINS_HOME', 'JENKINS_URL', 'TRAVIS', 'CIRCLECI', 'CI', 'APPCENTER_BUILD_ID', 'TEAMCITY_VERSION', 'GO_PIPELINE_NAME', 'bamboo_buildKey', 'GITLAB_CI', 'XCS', 'TF_BUILD'].each do |current|
+      ['JENKINS_HOME', 'JENKINS_URL', 'TRAVIS', 'CI', 'APPCENTER_BUILD_ID', 'TEAMCITY_VERSION', 'GO_PIPELINE_NAME', 'bamboo_buildKey', 'GITLAB_CI', 'XCS', 'TF_BUILD', 'GITHUB_ACTION', 'GITHUB_ACTIONS', 'BITRISE_IO', 'BUDDY'].each do |current|
         return true if ENV.key?(current)
       end
       return false
+    end
+
+    def self.is_circle_ci?
+      return ENV.key?('CIRCLECI')
     end
 
     def self.operating_system
@@ -101,7 +107,7 @@ module FastlaneCore
 
     # Do we want to disable the colored output?
     def self.colors_disabled?
-      FastlaneCore::Env.truthy?("FASTLANE_DISABLE_COLORS")
+      FastlaneCore::Env.truthy?("FASTLANE_DISABLE_COLORS") || ENV.key?("NO_COLOR")
     end
 
     # Does the user use the Mac stock terminal
@@ -197,14 +203,28 @@ module FastlaneCore
       return File.join(self.itms_path, 'iTMSTransporter')
     end
 
+    def self.user_defined_itms_path?
+      return FastlaneCore::Env.truthy?("FASTLANE_ITUNES_TRANSPORTER_PATH")
+    end
+
+    def self.user_defined_itms_path
+      return ENV["FASTLANE_ITUNES_TRANSPORTER_PATH"] if self.user_defined_itms_path?
+    end
+
     # @return the full path to the iTMSTransporter executable
     def self.itms_path
-      return ENV["FASTLANE_ITUNES_TRANSPORTER_PATH"] if FastlaneCore::Env.truthy?("FASTLANE_ITUNES_TRANSPORTER_PATH")
+      return self.user_defined_itms_path if FastlaneCore::Env.truthy?("FASTLANE_ITUNES_TRANSPORTER_PATH")
 
       if self.mac?
+        # First check for manually install iTMSTransporter
+        user_local_itms_path = "/usr/local/itms"
+        return user_local_itms_path if File.exist?(user_local_itms_path)
+
+        # Then check for iTMSTransporter in the Xcode path
         [
           "../Applications/Application Loader.app/Contents/MacOS/itms",
-          "../Applications/Application Loader.app/Contents/itms"
+          "../Applications/Application Loader.app/Contents/itms",
+          "../SharedFrameworks/ContentDeliveryServices.framework/Versions/A/itms" # For Xcode 11
         ].each do |path|
           result = File.expand_path(File.join(self.xcode_path, path))
           return result if File.exist?(result)
@@ -299,6 +319,22 @@ module FastlaneCore
       Helper.backticks(command, print: print)
     end
 
+    # Executes the provided block after adjusting the ENV to have the
+    # provided keys and values set as defined in hash. After the block
+    # completes, restores the ENV to its previous state.
+    def self.with_env_values(hash, &block)
+      old_vals = ENV.select { |k, v| hash.include?(k) }
+      hash.each do |k, v|
+        ENV[k] = hash[k]
+      end
+      yield
+    ensure
+      hash.each do |k, v|
+        ENV.delete(k) unless old_vals.include?(k)
+        ENV[k] = old_vals[k]
+      end
+    end
+
     # loading indicator
     #
 
@@ -387,6 +423,23 @@ module FastlaneCore
     def self.log
       UI.deprecated("Helper.log is deprecated. Use `UI` class instead")
       UI.current.log
+    end
+
+    def self.ask_password(message: "Passphrase: ", confirm: nil)
+      raise "This code should only run in interactive mode" unless UI.interactive?
+
+      loop do
+        password = UI.password(message)
+        if confirm
+          password2 = UI.password("Type passphrase again: ")
+          if password == password2
+            return password
+          end
+        else
+          return password
+        end
+        UI.error("Passphrases differ. Try again")
+      end
     end
   end
 end

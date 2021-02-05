@@ -5,30 +5,45 @@ module Snapshot
     require 'erb'
     require 'fastimage'
 
+    def html_path
+      if Snapshot.config[:html_template]
+        Snapshot.config[:html_template]
+      else
+        File.join(Snapshot::ROOT, "lib", "snapshot/page.html.erb")
+      end
+    end
+
     def generate
       UI.message("Generating HTML Report")
 
       screens_path = Snapshot.config[:output_directory]
 
-      @data = {}
+      @data_by_language = {}
+      @data_by_screen = {}
 
       Dir[File.join(screens_path, "*")].sort.each do |language_folder|
         language = File.basename(language_folder)
         Dir[File.join(language_folder, '*.png')].sort.each do |screenshot|
+          file_name = File.basename(screenshot)
           available_devices.each do |key_name, output_name|
-            next unless File.basename(screenshot).include?(key_name)
+            next unless file_name.include?(key_name)
             # This screenshot is from this device
-            @data[language] ||= {}
-            @data[language][output_name] ||= []
 
-            resulting_path = File.join('.', language, File.basename(screenshot))
-            @data[language][output_name] << resulting_path
+            @data_by_language[language] ||= {}
+            @data_by_language[language][output_name] ||= []
+
+            screen_name = file_name.sub(key_name + '-', '').sub('.png', '')
+            @data_by_screen[screen_name] ||= {}
+            @data_by_screen[screen_name][output_name] ||= {}
+
+            resulting_path = File.join('.', language, file_name)
+            @data_by_language[language][output_name] << resulting_path
+            @data_by_screen[screen_name][output_name][language] = resulting_path
             break # to not include iPhone 6 and 6 Plus (name is contained in the other name)
           end
         end
       end
 
-      html_path = File.join(Snapshot::ROOT, "lib", "snapshot/page.html.erb")
       html = ERB.new(File.read(html_path)).result(binding) # https://web.archive.org/web/20160430190141/www.rrn.dk/rubys-erb-templating-system
 
       export_path = "#{screens_path}/screenshots.html"
@@ -69,6 +84,9 @@ module Snapshot
       {
         # snapshot in Xcode 9 saves screenshots with the SIMULATOR_DEVICE_NAME
         # which includes spaces
+        'iPhone 11 Pro Max' => "iPhone 11 Pro Max",
+        'iPhone 11 Pro' => "iPhone 11 Pro",
+        'iPhone 11' => "iPhone 11",
         'iPhone XS Max' => "iPhone XS Max",
         'iPhone XS' => "iPhone XS",
         'iPhone XR' => "iPhone XR",
@@ -86,13 +104,18 @@ module Snapshot
         'iPhone SE' => "iPhone SE",
         'iPhone 4s' => "iPhone 4s (3.5-Inch)",
         'iPad 2' => 'iPad 2',
+        'iPad Air (3rd generation)' => 'iPad Air (3rd generation)',
         'iPad Air 2' => 'iPad Air 2',
         'iPad Air' => 'iPad Air',
         'iPad (5th generation)' => 'iPad (5th generation)',
+        'iPad (7th generation)' => 'iPad (7th generation)',
         'iPad Pro (9.7-inch)' => 'iPad Pro (9.7-inch)',
         'iPad Pro (9.7 inch)' => 'iPad Pro (9.7-inch)', # iOS 10.3.1 simulator
         'iPad Pro (10.5-inch)' => 'iPad Pro (10.5-inch)',
+        'iPad Pro (11-inch) (2nd generation)' => 'iPad Pro (11-inch) (2nd generation)',
         'iPad Pro (11-inch)' => 'iPad Pro (11-inch)',
+        'iPad Pro (12.9-inch) (4th generation)' => 'iPad Pro (12.9-inch) (4th generation)',
+        'iPad Pro (12.9-inch) (3rd generation)' => 'iPad Pro (12.9-inch) (3rd generation)',
         'iPad Pro (12.9-inch) (2nd generation)' => 'iPad Pro (12.9-inch) (2nd generation)',
         'iPad Pro (12.9-inch)' => 'iPad Pro (12.9-inch)',
         'iPad Pro (12.9 inch)' => 'iPad Pro (12.9-inch)', # iOS 10.3.1 simulator

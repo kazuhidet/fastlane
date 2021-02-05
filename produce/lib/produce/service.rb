@@ -36,7 +36,7 @@ module Produce
     end
 
     def valid_services_for(options)
-      allowed_keys = [:app_group, :apple_pay, :associated_domains, :auto_fill_credential, :data_protection, :game_center, :healthkit, :homekit,
+      allowed_keys = [:access_wifi, :app_group, :apple_pay, :associated_domains, :auto_fill_credential, :data_protection, :game_center, :healthkit, :homekit,
                       :hotspot, :icloud, :in_app_purchase, :inter_app_audio, :multipath, :network_extension,
                       :nfc_tag_reading, :personal_vpn, :passbook, :push_notification, :sirikit, :vpn_conf,
                       :wallet, :wireless_conf]
@@ -46,6 +46,15 @@ module Produce
     # rubocop:disable Metrics/PerceivedComplexity
     def update(on, app, options)
       updated = valid_services_for(options).count
+
+      if options.access_wifi
+        UI.message("\tAccess WiFi")
+        if on
+          app.update_service(Spaceship.app_service.access_wifi.on)
+        else
+          app.update_service(Spaceship.app_service.access_wifi.off)
+        end
+      end
 
       if options.app_group
         UI.message("\tApp Groups")
@@ -220,7 +229,13 @@ module Produce
         UI.message("\tPush Notifications")
 
         if on
-          app.update_service(Spaceship.app_service.push_notification.on)
+          # Don't enable push notifications if already enabled
+          # Enabling push notifications when already on revokes certs
+          # https://github.com/fastlane/fastlane/issues/15315
+          # https://github.com/fastlane/fastlane/issues/8883
+          unless app.details.enable_services.include?("push")
+            app.update_service(Spaceship.app_service.push_notification.on)
+          end
         else
           app.update_service(Spaceship.app_service.push_notification.off)
         end

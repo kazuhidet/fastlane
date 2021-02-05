@@ -1,5 +1,9 @@
 module Fastlane
   module Actions
+    module SharedValues
+      VERSION_NUMBER ||= :VERSION_NUMBER # originally defined in IncrementVersionNumberAction
+    end
+
     class GetVersionNumberAction < Action
       require 'shellwords'
 
@@ -12,7 +16,21 @@ module Fastlane
         project = get_project!(folder)
         target = get_target!(project, target_name)
         plist_file = get_plist!(folder, target, configuration)
-        version_number = get_version_number!(plist_file)
+        version_number = get_version_number_from_plist!(plist_file)
+
+        # Get from build settings (or project settings) if needed (ex: $(MARKETING_VERSION) is default in Xcode 11)
+        if version_number =~ /\$\(([\w\-]+)\)/
+          version_number = get_version_number_from_build_settings!(target, $1, configuration) || get_version_number_from_build_settings!(project, $1, configuration)
+
+        # ${MARKETING_VERSION} also works
+        elsif version_number =~ /\$\{([\w\-]+)\}/
+          version_number = get_version_number_from_build_settings!(target, $1, configuration) || get_version_number_from_build_settings!(project, $1, configuration)
+        end
+
+        # Error out if version_number is not set
+        if version_number.nil?
+          UI.user_error!("Unable to find Xcode build setting: #{$1}")
+        end
 
         # Store the number in the shared hash
         Actions.lane_context[SharedValues::VERSION_NUMBER] = version_number
@@ -61,8 +79,19 @@ module Fastlane
         target
       end
 
+      def self.get_version_number_from_build_settings!(target, variable, configuration = nil)
+        target.build_configurations.each do |config|
+          if configuration.nil? || config.name == configuration
+            value = config.resolve_build_setting(variable)
+            return value if value
+          end
+        end
+
+        return nil
+      end
+
       def self.get_plist!(folder, target, configuration = nil)
-        plist_files = target.resolved_build_setting("INFOPLIST_FILE")
+        plist_files = target.resolved_build_setting("INFOPLIST_FILE", true)
         plist_files_count = plist_files.values.compact.uniq.count
 
         # Get plist file for specified configuration
@@ -84,13 +113,18 @@ module Fastlane
           plist_file.gsub!("$(SRCROOT)/", "")
         end
 
-        plist_file = File.absolute_path(File.join(folder, plist_file))
+        # plist_file can be `Relative` or `Absolute` path.
+        # Make to `Absolute` path when plist_file is `Relative` path
+        unless File.exist?(plist_file)
+          plist_file = File.absolute_path(File.join(folder, plist_file))
+        end
+
         UI.user_error!("Cannot find plist file: #{plist_file}") unless File.exist?(plist_file)
 
         plist_file
       end
 
-      def self.get_version_number!(plist_file)
+      def self.get_version_number_from_plist!(plist_file)
         plist = Xcodeproj::Plist.read_from_path(plist_file)
         UI.user_error!("Unable to read plist: #{plist_file}") unless plist
 
@@ -113,7 +147,7 @@ module Fastlane
         [
           FastlaneCore::ConfigItem.new(key: :xcodeproj,
                              env_name: "FL_VERSION_NUMBER_PROJECT",
-                             description: "optional, you must specify the path to your main Xcode project if it is not in the project root directory",
+                             description: "Path to the main Xcode project to read version number from, optional. By default will use the first Xcode project found within the project root directory",
                              optional: true,
                              verify_block: proc do |value|
                                UI.user_error!("Please pass the path to the project, not the workspace") if value.end_with?(".xcworkspace")
@@ -121,11 +155,11 @@ module Fastlane
                              end),
           FastlaneCore::ConfigItem.new(key: :target,
                              env_name: "FL_VERSION_NUMBER_TARGET",
-                             description: "Specify a specific target if you have multiple per project, optional",
+                             description: "Target name, optional. Will be needed if you have more than one non-test target to avoid being prompted to select one",
                              optional: true),
           FastlaneCore::ConfigItem.new(key: :configuration,
                              env_name: "FL_VERSION_NUMBER_CONFIGURATION",
-                             description: "Specify a specific configuration if you have multiple per target, optional",
+                             description: "Configuration name, optional. Will be needed if you have altered the configurations from the default or your version number depends on the configuration selected",
                              optional: true)
         ]
       end
@@ -146,7 +180,11 @@ module Fastlane
 
       def self.example_code
         [
-          'version = get_version_number(xcodeproj: "Project.xcodeproj")'
+          'version = get_version_number(xcodeproj: "Project.xcodeproj")',
+          'version = get_version_number(
+            xcodeproj: "Project.xcodeproj",
+            target: "App"
+          )'
         ]
       end
 

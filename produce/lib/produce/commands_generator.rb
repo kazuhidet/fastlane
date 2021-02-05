@@ -26,6 +26,7 @@ module Produce
       program :help_formatter, :compact
 
       global_option('--verbose') { FastlaneCore::Globals.verbose = true }
+      global_option('--env STRING[,STRING2]', String, 'Add environment(s) to use with `dotenv`')
 
       command :create do |c|
         c.syntax = 'fastlane produce create'
@@ -45,6 +46,7 @@ module Produce
         c.description = 'Enable specific Application Services for a specific app on the Apple Developer Portal'
         c.example('Enable HealthKit, HomeKit and Passbook', 'fastlane produce enable_services -a com.example.app --healthkit --homekit --passbook')
 
+        c.option('--access-wifi', 'Enable Access WiFi')
         c.option('--app-group', 'Enable App Groups')
         c.option('--apple-pay', 'Enable Apple Pay')
         c.option('--auto-fill-credential', 'Enable AutoFill Credential')
@@ -85,6 +87,7 @@ module Produce
         c.description = 'Disable specific Application Services for a specific app on the Apple Developer Portal'
         c.example('Disable HealthKit', 'fastlane produce disable_services -a com.example.app --healthkit')
 
+        c.option('--access-wifi', 'Disable Access WiFi')
         c.option('--app-group', 'Disable App Groups')
         c.option('--apple-pay', 'Disable Apple Pay')
         c.option('--auto-fill-credential', 'Disable AutoFill Credential')

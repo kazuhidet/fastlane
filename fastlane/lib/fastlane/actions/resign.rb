@@ -17,22 +17,6 @@ module Fastlane
         "Codesign an existing ipa file"
       end
 
-      def self.details
-        sample = <<-SAMPLE.markdown_sample
-          ```ruby
-          resign(ipa: "path", signing_identity: "identity", provisioning_profile: {
-            "com.example.awesome-app" => "App.mobileprovision",
-            "com.example.awesome-app.app-extension" => "Extension.mobileprovision"
-          })
-          ```
-        SAMPLE
-
-        [
-          "You may provide multiple provisioning profiles if the application contains nested applications or app extensions, which need their own provisioning profile. You can do so by passing an array of provisiong profile strings or a hash that associates provisioning profile values to bundle identifier keys.".markdown_preserve_newlines,
-          sample
-        ].join("\n")
-      end
-
       def self.example_code
         [
           'resign(
@@ -40,7 +24,11 @@ module Fastlane
             signing_identity: "iPhone Distribution: Luka Mirosevic (0123456789)",
             provisioning_profile: "path/to/profile", # can omit if using the _sigh_ action
           )',
-          'resign(
+          '# You may provide multiple provisioning profiles if the application contains nested
+          # applications or app extensions, which need their own provisioning profile.
+          # You can do so by passing an array of provisioning profile strings or a hash
+          # that associates provisioning profile values to bundle identifier keys.
+          resign(
             ipa: "path/to/ipa", # can omit if using the `ipa` action
             signing_identity: "iPhone Distribution: Luka Mirosevic (0123456789)",
             provisioning_profile: {
@@ -87,7 +75,7 @@ module Fastlane
                                                  else [value]
                                                  end
                                          files.each do |file|
-                                           UI.user_error!("Couldn't find provisiong profile at path '#{file}'") unless File.exist?(file)
+                                           UI.user_error!("Couldn't find provisioning profile at path '#{file}'") unless File.exist?(file)
                                          end
                                        end),
           FastlaneCore::ConfigItem.new(key: :version,
@@ -120,7 +108,7 @@ module Fastlane
                                        optional: true),
           FastlaneCore::ConfigItem.new(key: :use_app_entitlements,
                                        env_name: "FL_USE_APP_ENTITLEMENTS",
-                                       description: "Extract app bundle codesigning entitlements and combine with entitlements from new provisionin profile",
+                                       description: "Extract app bundle codesigning entitlements and combine with entitlements from new provisioning profile",
                                        conflicting_options: [:entitlements],
                                        is_string: false,
                                        optional: true),

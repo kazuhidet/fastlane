@@ -45,6 +45,9 @@ module Scan
       coerce_to_array_of_strings(:only_testing)
       coerce_to_array_of_strings(:skip_testing)
 
+      coerce_to_array_of_strings(:only_test_configurations)
+      coerce_to_array_of_strings(:skip_test_configurations)
+
       return config
     end
 
@@ -108,7 +111,7 @@ module Scan
     def self.detect_simulator(devices, requested_os_type, deployment_target_key, default_device_name, simulator_type_descriptor)
       require 'set'
 
-      deployment_target_version = Scan.project.build_settings(key: deployment_target_key) || '0'
+      deployment_target_version = get_deployment_target_version(deployment_target_key)
 
       simulators = filter_simulators(
         FastlaneCore::DeviceManager.simulators(requested_os_type).tap do |array|
@@ -184,15 +187,12 @@ module Scan
         end
       end
 
+      # Convert array to lazy enumerable (evaluate map only when needed)
       # grab the first unempty evaluated array
-      if default
-        Scan.devices = [matches, default].lazy.map { |x|
-          arr = x.call
-          arr unless arr.empty?
-        }.reject(&:nil?).first
-      else
-        Scan.devices = []
-      end
+      Scan.devices = [matches, default].lazy.reject(&:nil?).map { |x|
+        arr = x.call
+        arr unless arr.empty?
+      }.reject(&:nil?).first
     end
 
     def self.min_xcode8?
@@ -209,11 +209,18 @@ module Scan
       end
 
       # building up the destination now
-      if Scan.devices && Scan.devices.count > 0
+      if Scan.building_mac_catalyst_for_mac?
+        Scan.config[:destination] = ["platform=macOS,variant=Mac Catalyst"]
+      elsif Scan.devices && Scan.devices.count > 0
         Scan.config[:destination] = Scan.devices.map { |d| "platform=#{d.os_type} Simulator,id=#{d.udid}" }
       elsif Scan.project.mac_app?
         Scan.config[:destination] = min_xcode8? ? ["platform=macOS"] : ["platform=OS X"]
       end
+    end
+
+    # get deployment target version
+    def self.get_deployment_target_version(deployment_target_key)
+      Scan.config[:deployment_target_version] || Scan.project.build_settings(key: deployment_target_key) || '0'
     end
   end
 end

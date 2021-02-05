@@ -4,8 +4,8 @@ require 'securerandom'
 require 'security'
 require 'shellwords'
 
-require_relative '../module'
 require_relative '../change_password'
+require_relative '../module'
 
 module Match
   module Encryption
@@ -29,15 +29,22 @@ module Match
       end
 
       def encrypt_files
+        files = []
+        password = fetch_password!
         iterate(self.working_directory) do |current|
+          files << current
           encrypt_specific_file(path: current, password: password)
           UI.success("🔒  Encrypted '#{File.basename(current)}'") if FastlaneCore::Globals.verbose?
         end
         UI.success("🔒  Successfully encrypted certificates repo")
+        return files
       end
 
       def decrypt_files
+        files = []
+        password = fetch_password!
         iterate(self.working_directory) do |current|
+          files << current
           begin
             decrypt_specific_file(path: current, password: password)
           rescue => ex
@@ -45,12 +52,13 @@ module Match
             UI.error("Couldn't decrypt the repo, please make sure you enter the right password!")
             UI.user_error!("Invalid password passed via 'MATCH_PASSWORD'") if ENV["MATCH_PASSWORD"]
             clear_password
-            self.decrypt_files # call itself
+            self.decrypt_files # Call itself
             return
           end
           UI.success("🔓  Decrypted '#{File.basename(current)}'") if FastlaneCore::Globals.verbose?
         end
         UI.success("🔓  Successfully decrypted certificates repo")
+        return files
       end
 
       def store_password(password)
@@ -65,7 +73,7 @@ module Match
       private
 
       def iterate(source_path)
-        Dir[File.join(source_path, "**", "*.{cer,p12,mobileprovision}")].each do |path|
+        Dir[File.join(source_path, "**", "*.{cer,p12,mobileprovision,provisionprofile}")].each do |path|
           next if File.directory?(path)
           yield(path)
         end
@@ -77,7 +85,7 @@ module Match
       end
 
       # Access the MATCH_PASSWORD, either from ENV variable, Keychain or user input
-      def password
+      def fetch_password!
         password = ENV["MATCH_PASSWORD"]
         unless password
           item = Security::InternetPassword.find(server: server_name(self.keychain_name))
@@ -93,7 +101,7 @@ module Match
             UI.important("Enter the passphrase that should be used to encrypt/decrypt your certificates")
             UI.important("This passphrase is specific per repository and will be stored in your local keychain")
             UI.important("Make sure to remember the password, as you'll need it when you run match on a different machine")
-            password = ChangePassword.ask_password(confirm: true)
+            password = FastlaneCore::Helper.ask_password(message: "Passphrase for Match storage: ", confirm: true)
             store_password(password)
           end
         end
@@ -110,7 +118,7 @@ module Match
       def encrypt_specific_file(path: nil, password: nil)
         UI.user_error!("No password supplied") if password.to_s.strip.length == 0
 
-        data_to_encrypt = File.read(path)
+        data_to_encrypt = File.binread(path)
         salt = SecureRandom.random_bytes(8)
 
         # The :: is important, as there is a name clash
@@ -144,7 +152,7 @@ module Match
       rescue => error
         fallback_hash_algorithm = "SHA256"
         if hash_algorithm != fallback_hash_algorithm
-          decrypt_specific_file(path, password, fallback_hash_algorithm)
+          decrypt_specific_file(path: path, password: password, hash_algorithm: fallback_hash_algorithm)
         else
           UI.error(error.to_s)
           UI.crash!("Error decrypting '#{path}'")

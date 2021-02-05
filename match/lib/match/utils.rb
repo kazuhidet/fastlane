@@ -4,7 +4,7 @@ require_relative 'module'
 
 module Match
   class Utils
-    def self.import(item_path, keychain, password: "")
+    def self.import(item_path, keychain, password: nil)
       keychain_path = FastlaneCore::Helper.keychain_path(keychain)
       FastlaneCore::KeychainImporter.import_file(item_path, keychain_path, keychain_password: password, output: FastlaneCore::Globals.verbose?)
     end
@@ -32,7 +32,7 @@ module Match
     end
 
     def self.get_cert_info(cer_certificate_path)
-      cert = OpenSSL::X509::Certificate.new(File.read(cer_certificate_path))
+      cert = OpenSSL::X509::Certificate.new(File.binread(cer_certificate_path))
 
       # openssl output:
       # subject= /UID={User ID}/CN={Certificate Name}/OU={Certificate User}/O={Organisation}/C={Country}
@@ -54,8 +54,14 @@ module Match
                       .push([openssl_keys_to_readable_keys.fetch("notBefore"), cert.not_before])
                       .push([openssl_keys_to_readable_keys.fetch("notAfter"), cert.not_after])
     rescue => ex
-      UI.error(ex)
+      UI.error("get_cert_info: #{ex}")
       return {}
+    end
+
+    def self.is_cert_valid?(cer_certificate_path)
+      cert = OpenSSL::X509::Certificate.new(File.binread(cer_certificate_path))
+      now = Time.now.utc
+      return (now <=> cert.not_after) == -1
     end
 
     def self.base_environment_variable_name(app_identifier: nil, type: nil, platform: :ios)
